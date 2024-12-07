@@ -7,8 +7,13 @@ const closeMultiLineComment = /^[\*\/]*\*+\//;
 const SourceLine = require('./SourceLine');
 const FileStorage = require('./FileStorage');
 const Clone = require('./Clone');
+var crypto = require('crypto');
 
 const DEFAULT_CHUNKSIZE=5;
+
+// #kei
+// Look for #kei to see my comments
+// Look for ugabuga in the logs to see the custom logs added
 
 class CloneDetector {
     #myChunkSize = process.env.CHUNKSIZE || DEFAULT_CHUNKSIZE;
@@ -79,7 +84,7 @@ class CloneDetector {
         return match;
     }
 
-    #filterCloneCandidates(file, compareFile) {
+    #filterCloneCandidates(file, compareFile, hashesOfChunkFromSourceFile) {
         // TODO
         // For each chunk in file.chunks, find all #chunkMatch() in compareFile.chunks
         // For each matching chunk, create a new Clone.
@@ -92,8 +97,21 @@ class CloneDetector {
         // Return: file, including file.instances which is an array of Clone objects (or an empty array).
         //
 
-        file.instances = file.instances || [];        
-        file.instances = file.instances.concat(newInstances);
+        // #Kei
+        // to use chunkMatch will be kinda expensive so we just hash file's chunks
+        // beforehand to have an 0(1) lookup
+        // if we use chunkMatch as is, we might end up with an O(n^2) complexity
+        // or worse- I did zero proper calculations so don't quote me on this hahaha
+        const possibleClones = compareFile.chunks.reduce((acc, chunk) => {
+            const hash = crypto.createHash('MD5').update(JSON.stringify(chunk)).digest('hex');
+            if (hashesOfChunkFromSourceFile[hash] !== undefined) {
+                acc.push(new Clone(file.name, compareFile.name, file.chunks[hashesOfChunkFromSourceFile[hash]], chunk));
+            }
+            return acc;
+        }, [])
+
+        console.log("ugabuga filterCloneCandidates possible clones found", possibleClones)
+        file.instances = (file.instances || []).concat(possibleClones);
         return file;
     }
      
@@ -112,6 +130,30 @@ class CloneDetector {
         //         and not any of the Clones used during that expansion.
         //
 
+        file.instances = file.instances.reduce((acc, clone) => {
+            if(!acc.length) {
+                acc.push(clone);
+                return acc;
+            }
+
+            let expanded = false;
+
+            // #kei
+            // looks expensive- we can try to optimize this
+            for (let i = 0; i < acc.length; i++) {
+                if (acc[i].maybeExpandWith(clone)) {
+                    expanded = true;
+                    break;
+                }
+            }
+            if (!expanded) {
+                acc.push(clone);
+            }
+            return acc;
+        }, []);
+
+        console.log("ugabuga expandCloneCandidates (there should be less clones now)", file.instances)
+
         return file;
     }
     
@@ -128,6 +170,25 @@ class CloneDetector {
         //
         // Return: file, with file.instances containing unique Clone objects that may contain several targets
         //
+
+        // #kei
+        // idk what the TODO is saying but I guess it just wants a deduplication?
+        // so I'll just use a hash map to store the clones and we can use it for
+        // an O(1) lookup instead of re-iterating over the array again
+        const seen = {}
+
+        file.instances.forEach((clone) => {
+            const { sourceName, sourceStart, sourceEnd } = clone;
+            const key = `${sourceName}-${sourceStart}-${sourceEnd}`;
+            if(seen[key]) {
+                seen[key].addTarget(clone);
+                return
+            }
+            seen[key] = clone;
+        })
+
+        file.instances = Object.values(seen);
+        console.log("ugabuga consolidateClones (there should be no clone duplicates anymore)", file.instances)
 
         return file;
     }
@@ -154,8 +215,14 @@ class CloneDetector {
     }
 
     matchDetect(file) {
+        const hashesOfChunkFromSourceFile = file.chunks.reduce( (accumulator, chunk, index) => {
+            const hash = crypto.createHash('MD5').update(JSON.stringify(chunk)).digest('hex');
+            accumulator[hash] = index;
+            return accumulator;
+        }, {});
         let allFiles = this.#myFileStore.getAllFiles();
         file.instances = file.instances || [];
+
         for (let f of allFiles) {
             // TODO implement these methods (or re-write the function matchDetect() to your own liking)
             // 
@@ -170,7 +237,7 @@ class CloneDetector {
             //
             // 3. If the same clone is found in several places, consolidate them into one Clone.
             //
-            file = this.#filterCloneCandidates(file, f); 
+            file = this.#filterCloneCandidates(file, f, hashesOfChunkFromSourceFile); 
             file = this.#expandCloneCandidates(file);
             file = this.#consolidateClones(file); 
         }
